@@ -6,11 +6,11 @@ from app.models.user import User
 from app.schemas.user import UserCreate,UserResponse
 
 router=APIRouter(
-    prefix="/register",
-    tags=["register"]
+    prefix="/auth",
+    tags=["auth"]
 )
 
-@router.post("/",status_code=201,response_model=UserResponse)
+@router.post("/register",status_code=201,response_model=UserResponse)
 def register(user:UserCreate,db:Session=Depends(getdb)):
     try:
         existing_user=db.query(User).filter((User.username==user.username)|(User.email==user.email)).first()

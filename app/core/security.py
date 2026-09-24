@@ -1,16 +1,18 @@
 from datetime import datetime,timedelta,timezone
 import jwt
+import uuid
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.database import getdb
 from app.models.user import User
 SECRET_KEY="51bg5fg64b1s15sasdfafdsgfgbgf54as65d1f651ra"
 ALGORITHM="HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES=10
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 pwd_context =CryptContext(schemes=["bcrypt"],deprecated="auto")
 
@@ -28,23 +30,25 @@ def create_access_token(data:dict)->str:
     return jwt.encode(
         to_encode,
         SECRET_KEY,
-        ALGORITHM
+        algorithm=ALGORITHM
     )
-oauth2_scheme=OAuth2PasswordBearer(tokenUrl="login/")
+oauth2_scheme = HTTPBearer()
 
 
-def get_current_user(token:str=Depends(oauth2_scheme),db:Session=Depends(getdb)):
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
+                     db:Session = Depends(getdb)):
     try:
+        token = credentials.credentials
         payload=jwt.decode(
             token,
             SECRET_KEY,
-            ALGORITHM=[ALGORITHM]
+            algorithms=[ALGORITHM]
         )
         user_id = payload.get("sub")
         if  user_id is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid token")
 
-        db_user=db.query(User).filter(User.id==user_id).first()
+        db_user=db.query(User).filter(User.id==int(user_id)).first()
 
         if db_user is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="user not found")
@@ -52,15 +56,24 @@ def get_current_user(token:str=Depends(oauth2_scheme),db:Session=Depends(getdb))
         return db_user
 
 
+    except jwt.InvalidTokenError as e:
 
+        raise HTTPException(
 
+            status_code=401,
 
+            detail=str(e))
 
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid or expired token")
+def create_refresh_token(data:dict)->str:
+    toencode=data.copy()
+    expires=datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    toencode.update({"exp":expires,"type":"refresh","jti":str(uuid.uuid4())})
 
-
-
+    return jwt.encode(
+        toencode,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
 
 
 
