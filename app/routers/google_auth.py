@@ -1,10 +1,12 @@
-
+import jwt
 from fastapi import APIRouter, HTTPException, Request  # HTTPException eklendi
 from fastapi.params import Depends
 from authlib.integrations.starlette_client import OAuth
 from sqlalchemy.orm import Session
-
-from app.core.security import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,create_google_pending_token
+from app.database import getdb
+from app.models.AuthAccount import AuthAccount
+from app.models.user import User
+from app.core.security import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, create_google_pending_token, SECRET_KEY, ALGORITHM
 from app.database import getdb
 from app.models.AuthAccount import AuthAccount
 
@@ -90,3 +92,78 @@ async def google_callback(request: Request, db: Session = Depends(getdb)):
             status_code=400,
             detail=f"Google kimlik doğrulama işlemi başarısız: {str(e)}"
         )
+
+
+@router.post("/google/complete")
+async def complete_google_signup(
+    username:str,
+    pending_token:str,
+    db:Session=Depends(getdb)
+    ):
+    try:
+        payload=jwt.decode(
+            pending_token,
+            SECRET_KEY,algorithms=[ALGORITHM]
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400,detail="Google kayıt tokenı geçersiz veya süresi dolmuş")
+
+    if payload.get("type") !="google_pending":
+        raise HTTPException(status_code=400,detail="Invalid token type")
+
+
+    google_id = payload.get("sub")
+    email = payload.get("email")
+    name = payload.get("name")
+
+    if not google_id or not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Google kullanıcı bilgileri eksik"
+        )
+
+    existing_user = db.scalar(
+        Select(User).where(
+            User.username == username
+        )
+    )
+
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Bu username zaten kullanılıyor"
+        )
+
+
+
+    existing_google_account = db.scalar(
+        Select(AuthAccount).where(
+            AuthAccount.provider == "google",
+            AuthAccount.provider_account_id == google_id
+        )
+    )
+
+    user = User(
+        username=username,
+        email=email,
+        password=None,
+        is_active=True,
+        is_superuser=False
+    )
+
+    db.add(user)
+    db.flush()
+    auth_account = AuthAccount(
+        user_id=user.id,
+        provider="google",
+        provider_account_id=google_id,
+        password_hash=None
+    )
+    db.add(auth_account)
+    db.commit()
+    return {
+        "message": "Google hesabı başarıyla oluşturuldu",
+        "user_id": user.id,
+        "username": user.username
+    }
