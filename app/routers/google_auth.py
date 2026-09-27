@@ -3,11 +3,15 @@ from fastapi import APIRouter, HTTPException, Request  # HTTPException eklendi
 from fastapi.params import Depends
 from authlib.integrations.starlette_client import OAuth
 from sqlalchemy.orm import Session
-from app.database import getdb
-from app.models.AuthAccount import AuthAccount
+from app.schemas.token import Token
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
-from app.core.security import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, create_google_pending_token, SECRET_KEY, ALGORITHM
+from app.core.security import (create_access_token
+,create_refresh_token, GOOGLE_CLIENT_SECRET
+, create_google_pending_token, SECRET_KEY
+, ALGORITHM,GOOGLE_CLIENT_ID)
 from app.database import getdb
+from datetime import timezone,datetime
 from app.models.AuthAccount import AuthAccount
 
 from sqlalchemy import select as Select
@@ -35,13 +39,19 @@ oauth.register(
 @router.get("/google/login")
 async def google_login(request: Request):
     try:
+        print("LOGIN URL:", request.url)
+        print("LOGIN SESSION BEFORE:", request.session)
         redirect_uri = request.url_for("google_callback")
+
+        print("LOGIN SESSION AFTER:", request.session)
         return await oauth.google.authorize_redirect(
             request,
             redirect_uri
         )
+        print("AFTER REDIRECT SESSION:", request.session)
     except Exception as e:
-        # OAuth yönlendirme hatası durumunda
+        print("GOOGLE LOGIN ERROR:", repr(e))
+
         raise HTTPException(
             status_code=400,
             detail=f"Google giriş yönlendirmesi başarısız oldu: {str(e)}"
@@ -54,6 +64,8 @@ async def google_login(request: Request):
 )
 async def google_callback(request: Request, db: Session = Depends(getdb)):
     try:
+        print("CALLBACK SESSION:", request.session)
+        print("CALLBACK STATE:", request.query_params.get("state"))
         token = await oauth.google.authorize_access_token(request)
 
         user_info = token["userinfo"]
@@ -69,10 +81,44 @@ async def google_callback(request: Request, db: Session = Depends(getdb)):
         )
         if google_account:
             user = google_account.user
-            return {
-                "message": "Existing Google user",
-                "user_id": user.id
-            }
+
+            access_token = create_access_token({
+                "sub": str(user.id),
+                "username": user.username
+            })
+
+            refresh_token = create_refresh_token({
+                "sub": str(user.id)
+            })
+
+            payload = jwt.decode(
+                refresh_token,
+                SECRET_KEY,
+                algorithms=[ALGORITHM]
+            )
+
+            jti = payload["jti"]
+
+            expires = datetime.fromtimestamp(
+                payload["exp"],
+                tz=timezone.utc
+            )
+
+            db_refresh_token = RefreshToken(
+                token=jti,
+                user_id=user.id,
+                expires_at=expires,
+                revoked=False
+            )
+
+            db.add(db_refresh_token)
+            db.commit()
+
+            return Token(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_type="bearer"
+            )
 
         pending_token = create_google_pending_token({
             "sub": google_id,
@@ -80,17 +126,22 @@ async def google_callback(request: Request, db: Session = Depends(getdb)):
             "name": name
         })
 
-        # Frontend'e Google ID'yi doğrudan vermiyoruz.
         return {
             "requires_username": True,
             "pending_token": pending_token
         }
 
+
     except Exception as e:
-        # Token doğrulama, eksik anahtar (KeyError) veya veritabanı hatalarını yakalar
+
+        print("GOOGLE CALLBACK ERROR:", repr(e))
+
         raise HTTPException(
-            status_code=400,
-            detail=f"Google kimlik doğrulama işlemi başarısız: {str(e)}"
+
+            status_code=500,
+
+            detail=f"Google callback error: {repr(e)}"
+
         )
 
 
@@ -115,7 +166,7 @@ async def complete_google_signup(
 
     google_id = payload.get("sub")
     email = payload.get("email")
-    name = payload.get("name")
+
 
     if not google_id or not email:
         raise HTTPException(
@@ -162,8 +213,46 @@ async def complete_google_signup(
     )
     db.add(auth_account)
     db.commit()
-    return {
-        "message": "Google hesabı başarıyla oluşturuldu",
-        "user_id": user.id,
+    access_token = create_access_token({
+        "sub": str(user.id),
         "username": user.username
+    })
+
+
+    refresh_token = create_refresh_token({
+        "sub": str(user.id)
+    })
+
+
+    payload = jwt.decode(
+        refresh_token,
+        SECRET_KEY,
+        algorithms=[ALGORITHM]
+    )
+
+    jti = payload["jti"]
+
+    expires = datetime.fromtimestamp(
+        payload["exp"],
+        tz=timezone.utc
+    )
+
+
+    db_refresh_token = RefreshToken(
+        token=jti,
+        user_id=user.id,
+        expires_at=expires,
+        revoked=False
+    )
+
+    db.add(db_refresh_token)
+
+
+    db.commit()
+
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
     }
